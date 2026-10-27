@@ -7,8 +7,10 @@ namespace Sinio\Model;
 final class Entity
 {
     /**
+     * @param EntityKind|string $kind a string must be one of the `EntityKind` values
+     * @param string|null $subkind free code qualifying the kind (`nfc_kiosk`, ...); not empty when given
      * @param string|null $location external id of the location the entity sits in
-     * @param array<string, mixed>|null $attributes free-form attributes stored alongside the entity
+     * @param array<string, mixed>|null $attributes a JSON object (an associative array, never a list) of free-form attributes stored alongside the entity
      */
     public function __construct(
         public readonly string $externalId,

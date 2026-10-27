@@ -10,6 +10,7 @@ use Sinio\Exception\ConnectionException;
 use Sinio\Exception\RateLimitException;
 use Sinio\Exception\RequestException;
 use Sinio\Exception\ServerException;
+use Sinio\Internal\Json;
 
 /** Retries, backoff, and the mapping of statuses to exceptions. */
 final class Transport
@@ -60,9 +61,7 @@ final class Transport
             }
 
             if ($response->status >= 200 && $response->status < 300) {
-                $decoded = self::decode($response->body);
-
-                return is_array($decoded) ? $decoded : [];
+                return Json::object(self::decode($response->body));
             }
 
             $retryAfter = self::parseRetryAfter($response->headers['retry-after'] ?? null);
@@ -162,7 +161,10 @@ final class Transport
         $message = $body['message'] ?? null;
         // NestJS's ValidationPipe returns an array of messages, one per failed rule.
         if (is_array($message)) {
-            return implode('; ', array_map(static fn (mixed $item): string => (string) $item, $message));
+            return implode('; ', array_map(
+                static fn (mixed $item): string => is_scalar($item) ? (string) $item : json_encode($item, JSON_THROW_ON_ERROR),
+                $message,
+            ));
         }
 
         return is_string($message) ? $message : null;

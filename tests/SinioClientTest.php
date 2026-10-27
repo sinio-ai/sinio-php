@@ -4,18 +4,21 @@ declare(strict_types=1);
 
 namespace Sinio\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Sinio\Exception\AuthException;
 use Sinio\Exception\RateLimitException;
 use Sinio\Exception\RequestException;
 use Sinio\Exception\ValidationException;
 use Sinio\Model\Assignment;
+use Sinio\Model\AssignmentRelation;
 use Sinio\Model\Entity;
 use Sinio\Model\EntityKind;
 use Sinio\Model\Event;
 use Sinio\Model\EventRoles;
 use Sinio\Model\Location;
 use Sinio\Model\LocationLevel;
+use Sinio\Model\RejectionCode;
 use Sinio\SinioClient;
 
 final class SinioClientTest extends TestCase
@@ -306,6 +309,156 @@ final class SinioClientTest extends TestCase
             'valid_from' => '2026-01-01T00:00:00+01:00',
         ]], $sender->calls[0]['body']['assignments']);
         self::assertSame('overlapping_assignment', $result->rejections[0]->code);
+        self::assertSame(RejectionCode::OverlappingAssignment, $result->rejections[0]->knownCode);
+    }
+
+    /** @return iterable<string, array{0: \Closure(SinioClient): mixed, 1: string}> */
+    public static function locallyRefusedInputs(): iterable
+    {
+        $at = '2026-08-28T07:58:12+02:00';
+        $event = static fn (array $fields): \Closure => static fn (SinioClient $client): mixed => $client->sendEvents([
+            new Event(...['sourceEventId' => 'evt_1', 'type' => 'badge_in', 'occurredAt' => $at, ...$fields]),
+        ]);
+        $entity = static fn (array $fields): \Closure => static fn (SinioClient $client): mixed => $client->upsertEntities([
+            new Entity(...['externalId' => 'BORNE-A12', 'kind' => EntityKind::Device, ...$fields]),
+        ]);
+        $location = static fn (array $fields): \Closure => static fn (SinioClient $client): mixed => $client->upsertLocations([
+            new Location(...['externalId' => 'SITE-A', 'kind' => LocationLevel::Site, 'name' => 'Site A', ...$fields]),
+        ]);
+        $assignment = static fn (array $fields): \Closure => static fn (SinioClient $client): mixed => $client->createAssignments([
+            new Assignment(...['credential' => '04A2B9C1', 'subject' => 'P-4582', 'validFrom' => $at, ...$fields]),
+        ]);
+
+        yield 'event without source_event_id' => [$event(['sourceEventId' => '']), 'events[0].sourceEventId is required'];
+        yield 'event without type' => [$event(['type' => '']), 'events[0].type is required'];
+        yield 'event without occurred_at' => [$event(['occurredAt' => '']), 'events[0].occurredAt is required'];
+        yield 'event with an empty role' => [
+            $event(['roles' => new EventRoles(device: 'BORNE-A12', subject: '')]),
+            'events[0].roles.subject must not be empty',
+        ];
+        yield 'event with a list payload' => [
+            $event(['payload' => ['04A2B9C1', 'BORNE-A12']]),
+            'events[0].payload must be a JSON object',
+        ];
+        yield 'entity with an unknown kind' => [
+            $entity(['kind' => 'devise']),
+            'entities[0].kind must be one of device, subject, asset, actor, credential (got "devise")',
+        ];
+        yield 'entity without external_id' => [$entity(['externalId' => '']), 'entities[0].externalId is required'];
+        yield 'entity without kind' => [$entity(['kind' => '']), 'entities[0].kind is required'];
+        yield 'entity with an empty subkind' => [$entity(['subkind' => '']), 'entities[0].subkind must not be empty'];
+        yield 'entity with list attributes' => [
+            $entity(['attributes' => ['2.4.1']]),
+            'entities[0].attributes must be a JSON object',
+        ];
+        yield 'location with an unknown kind' => [
+            $location(['kind' => 'room']),
+            'locations[0].kind must be one of site, zone, point (got "room")',
+        ];
+        yield 'location without external_id' => [$location(['externalId' => '']), 'locations[0].externalId is required'];
+        yield 'location without kind' => [$location(['kind' => '']), 'locations[0].kind is required'];
+        yield 'location without name' => [$location(['name' => '']), 'locations[0].name is required'];
+        yield 'assignment with an unknown relation' => [
+            $assignment(['relation' => 'owned_by']),
+            'assignments[0].relation must be one of assigned_to (got "owned_by")',
+        ];
+        yield 'assignment without credential' => [$assignment(['credential' => '']), 'assignments[0].credential is required'];
+        yield 'assignment without subject' => [$assignment(['subject' => '']), 'assignments[0].subject is required'];
+        yield 'assignment without valid_from' => [$assignment(['validFrom' => '']), 'assignments[0].validFrom is required'];
+        yield 'assignment with valid_from without offset' => [
+            $assignment(['validFrom' => '2026-01-01T00:00:00']),
+            'assignments[0].validFrom must be an ISO 8601 timestamp with an offset',
+        ];
+        yield 'assignment with valid_to without offset' => [
+            $assignment(['validTo' => '2026-12-31']),
+            'assignments[0].validTo must be an ISO 8601 timestamp with an offset',
+        ];
+        yield 'assignment with valid_to before valid_from' => [
+            $assignment(['validFrom' => '2026-06-01T00:00:00Z', 'validTo' => '2026-01-01T00:00:00Z']),
+            'assignments[0].validTo must be after validFrom',
+        ];
+        // The same instant written in two offsets is an empty range, refused by the API as well.
+        yield 'assignment with valid_to equal to valid_from' => [
+            $assignment(['validFrom' => '2026-06-01T02:00:00+02:00', 'validTo' => '2026-06-01T00:00:00Z']),
+            'assignments[0].validTo must be after validFrom',
+        ];
+    }
+
+    /** @param \Closure(SinioClient): mixed $call */
+    #[DataProvider('locallyRefusedInputs')]
+    public function testRefusesLocallyWhatTheApiWouldRefuse(\Closure $call, string $message): void
+    {
+        $sender = new StubSender([self::OK_EVENTS]);
+        $client = $this->client($sender, ['apiKey' => 'sk']);
+
+        try {
+            $call($client);
+            self::fail('Expected a ValidationException');
+        } catch (ValidationException $error) {
+            self::assertStringContainsString($message, $error->getMessage());
+        }
+        self::assertSame([], $sender->calls);
+    }
+
+    public function testNamesTheIndexOfTheRefusedItem(): void
+    {
+        $sender = new StubSender([self::OK_EVENTS]);
+        $client = $this->client($sender, ['apiKey' => 'sk']);
+
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('entities[3].kind must be one of device, subject, asset, actor, credential (got "devise")');
+        $client->upsertEntities([
+            new Entity(externalId: 'A', kind: EntityKind::Device),
+            new Entity(externalId: 'B', kind: 'subject'),
+            new Entity(externalId: 'C', kind: EntityKind::Asset),
+            new Entity(externalId: 'D', kind: 'devise'),
+        ]);
+    }
+
+    public function testAcceptsVocabularyStringsAndEnumsAndAValidRange(): void
+    {
+        $sender = new StubSender([[200, ['accepted' => 1, 'rejected' => 0, 'rejections' => []]]]);
+        $client = $this->client($sender, ['apiKey' => 'sk']);
+
+        $client->upsertEntities([new Entity(externalId: 'P-4582', kind: 'subject')]);
+        $client->upsertLocations([new Location(externalId: 'SITE-A', kind: 'site', name: 'Site A')]);
+        $client->createAssignments([
+            new Assignment(
+                credential: '04A2B9C1',
+                subject: 'P-4582',
+                validFrom: '2026-06-01T02:00:00+02:00',
+                validTo: '2026-06-01T00:00:00.001Z',
+                relation: AssignmentRelation::AssignedTo,
+            ),
+            new Assignment(credential: '04A2B9C2', subject: 'P-4583', validFrom: '2026-06-01T00:00:00Z', relation: 'assigned_to'),
+        ]);
+
+        self::assertSame('subject', $sender->calls[0]['body']['entities'][0]['kind']);
+        self::assertSame('site', $sender->calls[1]['body']['locations'][0]['kind']);
+        self::assertSame('assigned_to', $sender->calls[2]['body']['assignments'][0]['relation']);
+        self::assertSame('assigned_to', $sender->calls[2]['body']['assignments'][1]['relation']);
+        self::assertSame('2026-06-01T00:00:00.001Z', $sender->calls[2]['body']['assignments'][0]['valid_to']);
+    }
+
+    public function testKeepsAnUnknownRejectionCodeWithoutFailing(): void
+    {
+        $sender = new StubSender([[200, [
+            ...self::OK_EVENTS[1],
+            'accepted' => 0,
+            'rejected' => 2,
+            'rejections' => [
+                ['source_event_id' => 'evt_1', 'code' => 'quota_exceeded', 'message' => 'new in the API', 'hint' => 'x'],
+                ['source_event_id' => 'evt_2', 'code' => 'invalid_occurred_at', 'message' => 'nope'],
+            ],
+            'some_future_field' => ['nested' => true],
+        ]]]);
+        $client = $this->client($sender, ['apiKey' => 'sk']);
+
+        $result = $client->sendEvents([$this->anEvent('evt_1'), $this->anEvent('evt_2')]);
+
+        self::assertSame('quota_exceeded', $result->rejections[0]->code);
+        self::assertNull($result->rejections[0]->knownCode);
+        self::assertSame(RejectionCode::InvalidOccurredAt, $result->rejections[1]->knownCode);
     }
 
     public function testRetriesA503ThenSucceeds(): void

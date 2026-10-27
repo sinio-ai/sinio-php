@@ -8,6 +8,7 @@ use Sinio\Exception\ValidationException;
 use Sinio\Http\CurlSender;
 use Sinio\Http\Sender;
 use Sinio\Http\Transport;
+use Sinio\Internal\Json;
 use Sinio\Internal\Serializer;
 use Sinio\Model\Assignment;
 use Sinio\Model\AssignmentRejection;
@@ -32,7 +33,7 @@ use Sinio\Model\UpsertResult;
  */
 final class SinioClient
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.2.0';
     public const DEFAULT_BASE_URL = 'https://api.sinio.ai';
 
     private readonly Transport $transport;
@@ -47,8 +48,11 @@ final class SinioClient
      * @param string|null $webhookKey key carried in the URL instead of a header, for systems that can only
      *                                be pointed at a webhook URL; only `sendEvents()` is available in this
      *                                mode, and it is mutually exclusive with `$apiKey`
-     * @param string|null $sourceCode sent as `X-Source-Code`; optional when the key is already bound to a source
-     * @param string|null $project default project `external_id`, for publisher-level keys covering several projects
+     * @param string|null $sourceCode sent as `X-Source-Code`; optional when the key is already bound to a source,
+     *                                needed for keys covering several sources, such as organization-wide keys
+     *                                (issued on request)
+     * @param string|null $project default project `external_id`; only for organization-wide keys (issued on
+     *                             request), which cover several projects; a project key already carries its project
      * @param (callable(float): void)|null $sleep injectable sleep, so tests do not wait on retries
      */
     public function __construct(
@@ -95,6 +99,7 @@ final class SinioClient
      * Each call gets a `batch_id` from sinio.ai, collected in `$result->batchIds`: quote it to support.
      *
      * @param list<Event> $events
+     * @param string|null $sourceCode overrides the client's `$sourceCode` for this call (see the constructor)
      */
     public function sendEvents(
         array $events,
@@ -118,7 +123,7 @@ final class SinioClient
             $response = $this->transport->post($this->eventsPath, $body, $headers);
 
             $rejections = [];
-            foreach (self::rows($response, 'rejections') as $row) {
+            foreach (Json::objects($response, 'rejections') as $row) {
                 $rejections[] = new EventRejection(
                     self::str($row, 'source_event_id'),
                     self::str($row, 'code', 'unknown'),
@@ -166,6 +171,7 @@ final class SinioClient
      * someone to qualify in the console.
      *
      * @param list<Entity> $entities
+     * @param string|null $project overrides the client's `$project`; organization-wide keys only
      */
     public function upsertEntities(array $entities, ?string $project = null): UpsertResult
     {
@@ -181,6 +187,7 @@ final class SinioClient
      * `POST /v1/locations` -- bulk upsert of the location tree, keyed on `external_id`.
      *
      * @param list<Location> $locations
+     * @param string|null $project overrides the client's `$project`; organization-wide keys only
      */
     public function upsertLocations(array $locations, ?string $project = null): UpsertResult
     {
@@ -198,6 +205,7 @@ final class SinioClient
      * An overlap is rejected with `overlapping_assignment`, never merged silently.
      *
      * @param list<Assignment> $assignments
+     * @param string|null $project overrides the client's `$project`; organization-wide keys only
      */
     public function createAssignments(array $assignments, ?string $project = null): AssignmentsResult
     {
@@ -216,7 +224,7 @@ final class SinioClient
             );
 
             $rejections = [];
-            foreach (self::rows($response, 'rejections') as $row) {
+            foreach (Json::objects($response, 'rejections') as $row) {
                 $rejections[] = new AssignmentRejection(
                     self::str($row, 'credential'),
                     self::str($row, 'subject'),
@@ -251,7 +259,7 @@ final class SinioClient
             );
 
             $rejections = [];
-            foreach (self::rows($response, 'rejections') as $row) {
+            foreach (Json::objects($response, 'rejections') as $row) {
                 $rejections[] = new ReferenceRejection(
                     self::str($row, 'external_id'),
                     self::str($row, 'code', 'unknown'),
@@ -297,21 +305,6 @@ final class SinioClient
                 "{$operation} requires an API key: a webhook key only authenticates event ingestion."
             );
         }
-    }
-
-    /**
-     * @param array<string, mixed> $response
-     *
-     * @return list<array<string, mixed>>
-     */
-    private static function rows(array $response, string $key): array
-    {
-        $value = $response[$key] ?? null;
-        if (!is_array($value)) {
-            return [];
-        }
-
-        return array_values(array_filter($value, static fn (mixed $row): bool => is_array($row)));
     }
 
     /** @param array<string, mixed> $row */

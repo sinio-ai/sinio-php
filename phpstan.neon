@@ -1,4 +1,6 @@
 parameters:
-  level: 8
+  level: max
+  # The lowest PHP version composer.json supports, so nothing newer slips in.
+  phpVersion: 80100
   paths:
     - src

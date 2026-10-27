@@ -1,7 +1,7 @@
 # sinio/sinio-php
 
 Official client for the sinio.ai ingestion API. PHP 8.1+, `ext-curl` and
-`ext-json` only — no framework, no HTTP client dependency. PHPStan level 8 clean.
+`ext-json` only — no framework, no HTTP client dependency. PHPStan max level clean.
 
 ```bash
 composer require sinio/sinio-php
@@ -45,8 +45,12 @@ the API refuses any other key. `payload` is free and optional (`{}` by default).
   backoff and full jitter, honouring `Retry-After`. This is safe because
   a resend with the same `source_event_id` and the same content is counted in
   `duplicates`, never stored twice.
-- **Local validation.** A timestamp without a UTC offset is rejected before any
-  call, with the API's own rule, instead of coming back as an `invalid_occurred_at` rejection.
+- **Local validation.** What the API would refuse is refused before any call, with a
+  `ValidationException` naming the field and its index (`entities[3].kind must be one of
+  device, subject, asset, actor, credential (got "devise")`): a value outside its vocabulary,
+  a missing required field, an empty `subkind` or role, a `payload` or `attributes` that is a
+  list rather than an associative array, a timestamp without a UTC offset (the API's own rule),
+  a `validTo` not after `validFrom`.
 - **Typed exceptions.** `AuthException` (401/403, do not replay),
   `RequestException` (400/404/413, fix the request), `RateLimitException`
   (429, carries `retryAfterSeconds`), `ServerException` (5xx, replayable),
@@ -61,10 +65,18 @@ Within a batch, valid events are accepted even when others are rejected, so alwa
 read `rejections`:
 
 ```php
+use Sinio\Model\RejectionCode;
+
 foreach ($result->rejections as $rejection) {
     $logger->warning("{$rejection->sourceEventId} {$rejection->code}: {$rejection->message}");
+    if ($rejection->knownCode === RejectionCode::UnknownSource) {
+        // ...
+    }
 }
 ```
+
+`code` is the raw string; `knownCode` is the matching `RejectionCode` case, or `null` for a
+code added to the API after your SDK version (the list only grows, never breaks).
 
 `duplicates` and `revisions` are successes, not failures.
 
@@ -97,6 +109,10 @@ $sinio->createAssignments([
     ),
 ]);
 ```
+
+Vocabularies are backed enums: `EntityKind`, `LocationLevel`, `AssignmentRelation`,
+`IngestionMode`, `RejectionCode`. Their raw strings (`kind: 'device'`) are accepted too, and
+checked against the enum.
 
 The reference is never a condition of acceptance: an event pointing at an unknown
 device is still accepted. Upserting is how you enrich it, not how you gate it.
@@ -158,5 +174,5 @@ $sinio = new SinioClient(apiKey: $key, sender: new GuzzleSender($http));
 ```bash
 composer install
 composer test      # phpunit
-composer analyse   # phpstan level 8
+composer analyse   # phpstan max level, against PHP 8.1
 ```

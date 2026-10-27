@@ -3,6 +3,12 @@
   "description": "Official PHP SDK for the sinio.ai ingestion API (events, entities, locations, assignments).",
   "type": "library",
   "license": "MIT",
+  "homepage": "https://docs.sinio.ai/sdks",
+  "support": {
+    "issues": "https://github.com/sinio-ai/sinio-php/issues",
+    "source": "https://github.com/sinio-ai/sinio-php",
+    "docs": "https://docs.sinio.ai/sdks"
+  },
   "keywords": ["sinio", "events", "ingestion", "sdk"],
   "require": {
     "php": ">=8.1",

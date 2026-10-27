@@ -6,12 +6,19 @@ namespace Sinio\Internal;
 
 use Sinio\Exception\ValidationException;
 use Sinio\Model\Assignment;
+use Sinio\Model\AssignmentRelation;
 use Sinio\Model\Entity;
+use Sinio\Model\EntityKind;
 use Sinio\Model\Event;
+use Sinio\Model\EventRoles;
 use Sinio\Model\Location;
+use Sinio\Model\LocationLevel;
 
 /**
  * Mapping between the SDK models and the JSON wire format.
+ *
+ * Everything the API would refuse for a wrong value is refused here first, with a `ValidationException` naming
+ * the field and its index, before any network call.
  *
  * @internal
  */
@@ -32,9 +39,10 @@ final class Serializer
         if ($value instanceof \DateTimeInterface) {
             return $value->format(\DateTimeInterface::RFC3339);
         }
+        self::requireString($value, $field);
         if (preg_match(self::ISO_WITH_OFFSET, $value) !== 1) {
             throw new ValidationException(
-                "{$field} must be an ISO 8601 timestamp with an offset (got '{$value}')"
+                "{$field} must be an ISO 8601 timestamp with an offset (got \"{$value}\")"
             );
         }
 
@@ -67,19 +75,15 @@ final class Serializer
     /** @return array<string, mixed> */
     public static function event(Event $event, int $index): array
     {
-        if ($event->sourceEventId === '') {
-            throw new ValidationException("events[{$index}].sourceEventId is required");
-        }
-        if ($event->type === '') {
-            throw new ValidationException("events[{$index}].type is required");
-        }
+        $at = "events[{$index}]";
+        self::requireString($event->sourceEventId, "{$at}.sourceEventId");
+        self::requireString($event->type, "{$at}.type");
+        $occurredAt = self::toIso($event->occurredAt, "{$at}.occurredAt");
         if ($event->count !== null && ($event->count < 1 || $event->count > self::MAX_EVENT_COUNT)) {
             throw new ValidationException(
-                "events[{$index}].count must be an integer between 1 and " . self::MAX_EVENT_COUNT
+                "{$at}.count must be an integer between 1 and " . self::MAX_EVENT_COUNT . " (got {$event->count})"
             );
         }
-
-        $roles = $event->roles;
 
         return self::compact([
             'source_event_id' => $event->sourceEventId,
@@ -87,14 +91,9 @@ final class Serializer
             'project' => $event->project,
             'type' => $event->type,
             'label' => $event->label,
-            'occurred_at' => self::toIso($event->occurredAt, "events[{$index}].occurredAt"),
-            'roles' => $roles === null ? null : self::compact([
-                'device' => $roles->device,
-                'subject' => $roles->subject,
-                'location' => $roles->location,
-                'actor' => $roles->actor,
-            ]),
-            'payload' => $event->payload === null ? null : (object) $event->payload,
+            'occurred_at' => $occurredAt,
+            'roles' => $event->roles === null ? null : self::roles($event->roles, "{$at}.roles"),
+            'payload' => self::jsonObject($event->payload, "{$at}.payload"),
             'count' => $event->count,
         ]);
     }
@@ -102,33 +101,34 @@ final class Serializer
     /** @return array<string, mixed> */
     public static function entity(Entity $entity, int $index): array
     {
-        if ($entity->externalId === '') {
-            throw new ValidationException("entities[{$index}].externalId is required");
+        $at = "entities[{$index}]";
+        self::requireString($entity->externalId, "{$at}.externalId");
+        $kind = self::vocabulary($entity->kind, EntityKind::class, "{$at}.kind");
+        if ($entity->subkind === '') {
+            throw new ValidationException("{$at}.subkind must not be empty when given (omit it instead)");
         }
 
         return self::compact([
             'external_id' => $entity->externalId,
-            'kind' => $entity->kind instanceof \BackedEnum ? $entity->kind->value : $entity->kind,
+            'kind' => $kind->value,
             'subkind' => $entity->subkind,
             'label' => $entity->label,
             'location' => $entity->location,
-            'attributes' => $entity->attributes === null ? null : (object) $entity->attributes,
+            'attributes' => self::jsonObject($entity->attributes, "{$at}.attributes"),
         ]);
     }
 
     /** @return array<string, mixed> */
     public static function location(Location $location, int $index): array
     {
-        if ($location->externalId === '') {
-            throw new ValidationException("locations[{$index}].externalId is required");
-        }
-        if ($location->name === '') {
-            throw new ValidationException("locations[{$index}].name is required");
-        }
+        $at = "locations[{$index}]";
+        self::requireString($location->externalId, "{$at}.externalId");
+        $kind = self::vocabulary($location->kind, LocationLevel::class, "{$at}.kind");
+        self::requireString($location->name, "{$at}.name");
 
         return self::compact([
             'external_id' => $location->externalId,
-            'kind' => $location->kind instanceof \BackedEnum ? $location->kind->value : $location->kind,
+            'kind' => $kind->value,
             'name' => $location->name,
             'parent' => $location->parent,
         ]);
@@ -137,18 +137,114 @@ final class Serializer
     /** @return array<string, mixed> */
     public static function assignment(Assignment $assignment, int $index): array
     {
-        if ($assignment->credential === '' || $assignment->subject === '') {
-            throw new ValidationException("assignments[{$index}] requires both credential and subject");
+        $at = "assignments[{$index}]";
+        self::requireString($assignment->credential, "{$at}.credential");
+        self::requireString($assignment->subject, "{$at}.subject");
+        $relation = $assignment->relation === null
+            ? null
+            : self::vocabulary($assignment->relation, AssignmentRelation::class, "{$at}.relation");
+        $validFrom = self::toIso($assignment->validFrom, "{$at}.validFrom");
+        $validTo = $assignment->validTo === null ? null : self::toIso($assignment->validTo, "{$at}.validTo");
+        // The API's `invalid_validity_period`: the range must not be empty nor reversed.
+        if ($validTo !== null && self::epochMillis($validTo) <= self::epochMillis($validFrom)) {
+            throw new ValidationException(
+                "{$at}.validTo must be after validFrom (got \"{$validTo}\" for \"{$validFrom}\")"
+            );
         }
 
         return self::compact([
             'credential' => $assignment->credential,
             'subject' => $assignment->subject,
-            'relation' => $assignment->relation,
-            'valid_from' => self::toIso($assignment->validFrom, "assignments[{$index}].validFrom"),
-            'valid_to' => $assignment->validTo === null
-                ? null
-                : self::toIso($assignment->validTo, "assignments[{$index}].validTo"),
+            'relation' => $relation?->value,
+            'valid_from' => $validFrom,
+            'valid_to' => $validTo,
         ]);
+    }
+
+    /** @return array<string, string> */
+    private static function roles(EventRoles $roles, string $field): array
+    {
+        $given = [
+            'device' => $roles->device,
+            'subject' => $roles->subject,
+            'location' => $roles->location,
+            'actor' => $roles->actor,
+        ];
+        $wire = [];
+        foreach ($given as $role => $value) {
+            if ($value === null) {
+                continue;
+            }
+            if ($value === '') {
+                throw new ValidationException("{$field}.{$role} must not be empty when given (omit it instead)");
+            }
+            $wire[$role] = $value;
+        }
+
+        return $wire;
+    }
+
+    /**
+     * A JSON object on the wire: an associative array, never a list. An empty array stays `{}`, since PHP
+     * cannot tell an empty map from an empty list.
+     *
+     * @param array<mixed>|null $value
+     */
+    private static function jsonObject(?array $value, string $field): ?object
+    {
+        if ($value === null) {
+            return null;
+        }
+        if ($value !== [] && array_is_list($value)) {
+            throw new ValidationException("{$field} must be a JSON object (an associative array), not a list");
+        }
+
+        return (object) $value;
+    }
+
+    /**
+     * Resolves a vocabulary value given as its enum case or as its raw string.
+     *
+     * @template E of \BackedEnum
+     *
+     * @param E|string $value
+     * @param class-string<E> $enum
+     *
+     * @return E
+     */
+    private static function vocabulary(\BackedEnum|string $value, string $enum, string $field): \BackedEnum
+    {
+        if ($value instanceof $enum) {
+            return $value;
+        }
+        if (!is_string($value)) {
+            throw new ValidationException("{$field} must be a " . $enum . ' case');
+        }
+        self::requireString($value, $field);
+        $case = $enum::tryFrom($value);
+        if ($case === null) {
+            $allowed = implode(
+                ', ',
+                array_map(static fn (\BackedEnum $known): string => (string) $known->value, $enum::cases()),
+            );
+            throw new ValidationException("{$field} must be one of {$allowed} (got \"{$value}\")");
+        }
+
+        return $case;
+    }
+
+    private static function requireString(string $value, string $field): void
+    {
+        if ($value === '') {
+            throw new ValidationException("{$field} is required");
+        }
+    }
+
+    /** Milliseconds since the epoch, the precision the API compares validity bounds at. */
+    private static function epochMillis(string $iso): int
+    {
+        $moment = new \DateTimeImmutable($iso);
+
+        return $moment->getTimestamp() * 1000 + (int) $moment->format('v');
     }
 }
